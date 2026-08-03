@@ -214,6 +214,80 @@ func statusHandler(sup *Supervisor) http.HandlerFunc {
 	}
 }
 
+const dashboardHTML = `<!DOCTYPE html>
+<html>
+<head>
+<title>Watchdog Dashboard</title>
+<style>
+  body {
+    background: #000;
+    color: #fff;
+    font-family: monospace;
+    padding: 2rem;
+  }
+  h1 {
+    font-weight: normal;
+  }
+  #tiles {
+    display: flex;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .tile {
+    border: 1px solid #fff;
+    padding: 1rem 2rem;
+    min-width: 150px;
+    text-align: center;
+    white-space: pre;
+  }
+  .tile.running {
+    background: #0a0;
+    color: #000;
+  }
+  .tile.down {
+    background: #a00;
+    color: #fff;
+  }
+</style>
+</head>
+<body>
+<h1>Watchdog Dashboard</h1>
+<div id="tiles"></div>
+<script>
+function fetchStatus() {
+  fetch('/status')
+    .then(function(res) { return res.json(); })
+    .then(renderTiles)
+    .catch(function(err) { console.log('status fetch failed:', err); });
+}
+
+function renderTiles(statuses) {
+  var container = document.getElementById('tiles');
+  container.innerHTML = '';
+  for (var name in statuses) {
+    var status = statuses[name];
+    var tile = document.createElement('div');
+    tile.className = 'tile ' + (status === 'running' ? 'running' : 'down');
+    tile.textContent = name + '\n' + status;
+    container.appendChild(tile);
+  }
+}
+
+fetchStatus();
+setInterval(fetchStatus, 1000);
+</script>
+</body>
+</html>
+`
+
+// dashboardHandler serves the static dashboard page. All live data comes
+// from client-side polling of /status — this handler itself never touches
+// the Supervisor.
+func dashboardHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprint(w, dashboardHTML)
+}
+
 func main() {
 	sup := NewSupervisor()
 
@@ -231,6 +305,7 @@ func main() {
 	})
 
 	http.HandleFunc("/status", statusHandler(sup))
+	http.HandleFunc("/dashboard", dashboardHandler)
 
 	// --- Process supervision goroutines ---
 	// Two demo services, showing the two failure modes this project cares

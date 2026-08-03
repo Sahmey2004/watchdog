@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,6 +109,26 @@ func TestStatusHandler(t *testing.T) {
 	for name, status := range want {
 		if got[name] != status {
 			t.Errorf("expected %s to have status %q, got %q", name, status, got[name])
+		}
+	}
+}
+
+func TestDashboardHandler(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
+	rec := httptest.NewRecorder()
+
+	dashboardHandler(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/html" {
+		t.Errorf("expected Content-Type text/html, got %q", ct)
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"/status", "setInterval", "background: #000", "color: #fff"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected dashboard HTML to contain %q", want)
 		}
 	}
 }
