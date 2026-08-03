@@ -66,18 +66,63 @@ func TestSetStatusAndStatuses(t *testing.T) {
 func TestSuperviseSetsStatusTransitions(t *testing.T) {
 	sup := NewSupervisor()
 
-	go Supervise(sup, "test-exit", false, "sh", "-c", "exit 0")
+	go Supervise(sup, "test-exit", false, "sh", "-c", "sleep 0.1 && exit 0")
 
 	deadline := time.Now().Add(2 * time.Second)
 	var last string
+	sawRunning := false
 	for time.Now().Before(deadline) {
 		last = sup.Statuses()["test-exit"]
+		if last == "running" {
+			sawRunning = true
+		}
 		if last == "exited" {
+			if !sawRunning {
+				t.Fatalf("expected status %q to be observed before %q, but it never was", "running", "exited")
+			}
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected status %q for test-exit within 2s, last seen %q", "exited", last)
+}
+
+// TestRoutesWiring verifies that routes(sup) actually wires up /status and
+// /dashboard at the exact path strings a real HTTP client (or the
+// dashboard's own embedded JS, which calls fetch('/status')) would use.
+// Calling the handler functions directly, as other tests do, bypasses the
+// mux and would miss a path-string mismatch between Go and the embedded
+// JS — this test exercises real routing end-to-end via httptest.NewServer.
+func TestRoutesWiring(t *testing.T) {
+	sup := NewSupervisor()
+	sup.SetStatus("test-service", "running")
+	server := httptest.NewServer(routes(sup))
+	defer server.Close()
+
+	resp, err := http.Get(server.URL + "/status")
+	if err != nil {
+		t.Fatalf("GET /status failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 from /status, got %d", resp.StatusCode)
+	}
+	var statuses map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&statuses); err != nil {
+		t.Fatalf("failed to decode /status response: %v", err)
+	}
+	if statuses["test-service"] != "running" {
+		t.Errorf("expected test-service to be running, got %v", statuses)
+	}
+
+	resp2, err := http.Get(server.URL + "/dashboard")
+	if err != nil {
+		t.Fatalf("GET /dashboard failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 from /dashboard, got %d", resp2.StatusCode)
+	}
 }
 
 func TestStatusHandler(t *testing.T) {

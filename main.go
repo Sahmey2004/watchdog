@@ -288,11 +288,16 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, dashboardHTML)
 }
 
-func main() {
-	sup := NewSupervisor()
+// routes builds the HTTP mux for the supervisor's endpoints: /heartbeat,
+// /status, and /dashboard. Extracted out of main() so tests can exercise
+// real routing (e.g. via httptest.NewServer) instead of calling handler
+// functions directly, which would bypass the mux entirely and miss a
+// mismatch between a registered path and what a client actually requests.
+func routes(sup *Supervisor) *http.ServeMux {
+	mux := http.NewServeMux()
 
 	// --- HTTP handler: services POST here to say "I'm alive" ---
-	http.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/heartbeat", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Name string `json:"name"`
 		}
@@ -304,8 +309,16 @@ func main() {
 		fmt.Fprintf(w, "ok\n")
 	})
 
-	http.HandleFunc("/status", statusHandler(sup))
-	http.HandleFunc("/dashboard", dashboardHandler)
+	mux.HandleFunc("/status", statusHandler(sup))
+	mux.HandleFunc("/dashboard", dashboardHandler)
+
+	return mux
+}
+
+func main() {
+	sup := NewSupervisor()
+
+	mux := routes(sup)
 
 	// --- Process supervision goroutines ---
 	// Two demo services, showing the two failure modes this project cares
@@ -337,5 +350,5 @@ func main() {
 	}()
 
 	log.Println("Supervisor listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
