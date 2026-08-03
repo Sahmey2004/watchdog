@@ -21,6 +21,7 @@ type Supervisor struct {
 	services  map[string]time.Time
 	killChans map[string]chan struct{}
 	status    map[string]string
+	metrics   map[string]*ServiceMetrics
 	hub       *Hub
 }
 
@@ -29,6 +30,7 @@ func NewSupervisor() *Supervisor {
 		services:  make(map[string]time.Time),
 		killChans: make(map[string]chan struct{}),
 		status:    make(map[string]string),
+		metrics:   make(map[string]*ServiceMetrics),
 	}
 }
 
@@ -143,6 +145,12 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 	}
 
 	restarts := 0
+	// downSince is set the moment a running process stops (crash, clean
+	// exit, or stale-kill) and read back when the next attempt actually
+	// reaches "running" again, to compute how long that incident's
+	// downtime lasted. It stays zero before the service's very first
+	// start, since that's not a recovery from anything.
+	var downSince time.Time
 
 	for {
 		sup.SetStatus(serviceName, "starting")
@@ -175,6 +183,10 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 			continue
 		}
 
+		if !downSince.IsZero() {
+			sup.RecordRestart(serviceName, time.Since(downSince))
+			downSince = time.Time{}
+		}
 		sup.SetStatus(serviceName, "running")
 
 		// cmd.Wait() blocks until the process exits, so we run it in its
@@ -221,8 +233,19 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 		uptime := time.Since(start)
 		log.Printf("[supervise:%s] stopped after %v — %s — restarting\n", serviceName, uptime, reason)
 
+		downSince = time.Now()
 		restarts++
 		time.Sleep(1 * time.Second)
+	}
+}
+
+// metricsHandler returns an http.HandlerFunc that serves each service's
+// incident history as JSON, e.g.
+// {"hanging-worker": {"restart_count": 3, "total_downtime_ns": ..., "last_downtime_ns": ...}}
+func metricsHandler(sup *Supervisor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sup.Metrics())
 	}
 }
 
@@ -269,11 +292,23 @@ const dashboardHTML = `<!DOCTYPE html>
     background: #a00;
     color: #fff;
   }
+  #metrics {
+    margin-top: 2rem;
+  }
+  #metrics table {
+    border-collapse: collapse;
+  }
+  #metrics th, #metrics td {
+    border: 1px solid #fff;
+    padding: 0.5rem 1rem;
+    text-align: left;
+  }
 </style>
 </head>
 <body>
 <h1>Watchdog Dashboard</h1>
 <div id="tiles"></div>
+<div id="metrics"></div>
 <script>
 function fetchStatus() {
   fetch('/status')
@@ -307,8 +342,43 @@ ws.onerror = function(err) {
   console.log('websocket error, falling back to polling:', err);
 };
 
+function formatDuration(ns) {
+  var seconds = ns / 1e9;
+  if (seconds < 1) {
+    return Math.round(ns / 1e6) + 'ms';
+  }
+  return seconds.toFixed(1) + 's';
+}
+
+function fetchMetrics() {
+  fetch('/metrics')
+    .then(function(res) { return res.json(); })
+    .then(renderMetrics)
+    .catch(function(err) { console.log('metrics fetch failed:', err); });
+}
+
+function renderMetrics(metrics) {
+  var container = document.getElementById('metrics');
+  var names = Object.keys(metrics);
+  if (names.length === 0) {
+    container.innerHTML = '';
+    return;
+  }
+  var html = '<table><tr><th>Service</th><th>Restarts</th><th>Last downtime</th><th>Total downtime</th></tr>';
+  names.forEach(function(name) {
+    var m = metrics[name];
+    html += '<tr><td>' + name + '</td><td>' + m.restart_count + '</td><td>' +
+      formatDuration(m.last_downtime_ns) + '</td><td>' +
+      formatDuration(m.total_downtime_ns) + '</td></tr>';
+  });
+  html += '</table>';
+  container.innerHTML = html;
+}
+
 fetchStatus();
+fetchMetrics();
 setInterval(fetchStatus, 1000);
+setInterval(fetchMetrics, 1000);
 </script>
 </body>
 </html>
@@ -323,7 +393,7 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // routes builds the HTTP mux for the supervisor's endpoints: /heartbeat,
-// /status, /dashboard, and /ws. Extracted out of main() so tests can
+// /status, /metrics, /dashboard, and /ws. Extracted out of main() so tests can
 // exercise real routing (e.g. via httptest.NewServer) instead of calling
 // handler functions directly, which would bypass the mux entirely and
 // miss a mismatch between a registered path and what a client actually
@@ -345,6 +415,7 @@ func routes(sup *Supervisor, hub *Hub) *http.ServeMux {
 	})
 
 	mux.HandleFunc("/status", statusHandler(sup))
+	mux.HandleFunc("/metrics", metricsHandler(sup))
 	mux.HandleFunc("/dashboard", dashboardHandler)
 	mux.HandleFunc("/ws", wsHandler(sup, hub))
 

@@ -155,6 +155,15 @@ func TestRoutesWiring(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 from /dashboard, got %d", resp2.StatusCode)
 	}
+
+	resp3, err := http.Get(server.URL + "/metrics")
+	if err != nil {
+		t.Fatalf("GET /metrics failed: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 from /metrics, got %d", resp3.StatusCode)
+	}
 }
 
 // TestWebSocketPushesStatusUpdates connects a real WebSocket client to a
@@ -237,6 +246,32 @@ func TestStatusHandler(t *testing.T) {
 	}
 }
 
+func TestMetricsHandler(t *testing.T) {
+	sup := NewSupervisor()
+	sup.RecordRestart("hanging-worker", 2*time.Second)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+
+	metricsHandler(sup)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var got map[string]ServiceMetrics
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+	m, ok := got["hanging-worker"]
+	if !ok {
+		t.Fatalf("expected hanging-worker in response, got %v", got)
+	}
+	if m.RestartCount != 1 {
+		t.Errorf("expected RestartCount 1, got %d", m.RestartCount)
+	}
+}
+
 func TestDashboardHandler(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/dashboard", nil)
 	rec := httptest.NewRecorder()
@@ -250,7 +285,7 @@ func TestDashboardHandler(t *testing.T) {
 		t.Errorf("expected Content-Type text/html, got %q", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"/status", "setInterval", "background: #000", "color: #fff", "/ws", "WebSocket"} {
+	for _, want := range []string{"/status", "setInterval", "background: #000", "color: #fff", "/ws", "WebSocket", "/metrics", "fetchMetrics"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected dashboard HTML to contain %q", want)
 		}
