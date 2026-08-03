@@ -1,3 +1,5 @@
+
+
 # watchdog
 
 A small Go service supervisor that detects two kinds of failure — crashes
@@ -100,9 +102,11 @@ fakeservice/     Standalone demo binary simulating a service that hangs
 
 ## Demo
 
-_[Demo GIF goes here — record a terminal + browser session showing
-`hanging-worker` go silent, the tile flip red, and the automatic restart
-recovering it live.]_
+
+
+<img width="1280" height="754" alt="watchdog" src="https://github.com/user-attachments/assets/4c416e53-5c35-4d8d-a799-6b47192d3890" />
+
+
 
 ## Roadmap
 
