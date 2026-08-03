@@ -197,10 +197,7 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 			done <- cmd.Wait()
 		}()
 
-		// select waits on multiple channels at once and runs whichever
-		// case becomes ready FIRST. Here: either the process finishes on
-		// its own (done), or the checker tells us to kill it (killCh).
-		// Exactly one of these two branches will run each time through.
+	
 		var reason string
 		select {
 		case err := <-done:
