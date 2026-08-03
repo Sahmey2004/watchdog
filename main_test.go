@@ -58,3 +58,20 @@ func TestSetStatusAndStatuses(t *testing.T) {
 		t.Errorf("expected internal status to remain %q, got %q — Statuses() leaked the live map", "running", internal)
 	}
 }
+
+func TestSuperviseSetsStatusTransitions(t *testing.T) {
+	sup := NewSupervisor()
+
+	go Supervise(sup, "test-exit", false, "sh", "-c", "exit 0")
+
+	deadline := time.Now().Add(2 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		last = sup.Statuses()["test-exit"]
+		if last == "exited" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected status %q for test-exit within 2s, last seen %q", "exited", last)
+}

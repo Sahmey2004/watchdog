@@ -116,7 +116,7 @@ func (s *Supervisor) CheckStale(timeout time.Duration) []string {
 // kill channel so the stale-checker can reach in and restart it on a hang
 // — not just a crash.
 func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name string, args ...string) {
-	killCh := make(chan struct{}, 1) // buffered size 1: room for exactly one pending restart request
+	killCh := make(chan struct{}, 1)
 	if tracksHeartbeat {
 		sup.RegisterKillChan(serviceName, killCh)
 	}
@@ -124,12 +124,9 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 	restarts := 0
 
 	for {
+		sup.SetStatus(serviceName, "starting")
+
 		if tracksHeartbeat {
-			// Reset this service's clock the moment we (re)start it, giving
-			// it a full grace period to send its own first heartbeat before
-			// we start checking it for staleness again. Without this, a
-			// freshly restarted process could get killed again instantly —
-			// before it's even had a chance to prove it's alive.
 			sup.Heartbeat(serviceName)
 		}
 
@@ -140,11 +137,6 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
-		// cmd.Start() launches the process but does NOT wait for it — this
-		// is different from stage 2's cmd.Run(), which did both at once.
-		// We need Start() alone here because we want to watch for TWO
-		// possible things at once (exit or kill signal), which means we
-		// can't let Run() block us on just one of them.
 		if err := cmd.Start(); err != nil {
 			log.Printf("[supervise:%s] failed to start: %v\n", serviceName, err)
 			restarts++
@@ -152,41 +144,30 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 			continue
 		}
 
-		// cmd.Wait() blocks until the process exits, so we run it in its
-		// own goroutine and have it report the result on "done" — this
-		// frees up the current goroutine to simultaneously watch killCh.
+		sup.SetStatus(serviceName, "running")
+
 		done := make(chan error, 1)
 		go func() {
 			done <- cmd.Wait()
 		}()
 
-		// select waits on multiple channels at once and runs whichever
-		// case becomes ready FIRST. Here: either the process finishes on
-		// its own (done), or the checker tells us to kill it (killCh).
-		// Exactly one of these two branches will run each time through.
 		var reason string
 		select {
 		case err := <-done:
 			if err != nil {
 				reason = fmt.Sprintf("crashed: %v", err)
+				sup.SetStatus(serviceName, "crashed")
 			} else {
 				reason = "exited cleanly"
+				sup.SetStatus(serviceName, "exited")
 			}
 		case <-killCh:
 			if tracksHeartbeat {
-				// Reset the clock right now, the instant we consume this
-				// signal — not one loop iteration later. Without this,
-				// there's a real gap between "we decided to kill" and
-				// "the loop gets back around to resetting the timestamp,"
-				// and if the checker's ticker fires again during that
-				// gap, it still sees the old stale timestamp and queues
-				// up a second kill — which lands on the process we just
-				// restarted, within milliseconds, before it had any real
-				// chance to prove itself.
 				sup.Heartbeat(serviceName)
 			}
-			cmd.Process.Kill() // it's still running — force it to stop
-			<-done             // wait for Wait() to actually finish, so we don't leave a zombie process behind
+			sup.SetStatus(serviceName, "killed-stale")
+			cmd.Process.Kill()
+			<-done
 			reason = "killed — went silent (no heartbeat received in time)"
 		}
 
