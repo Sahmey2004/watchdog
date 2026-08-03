@@ -205,6 +205,15 @@ func Supervise(sup *Supervisor, serviceName string, tracksHeartbeat bool, name s
 	}
 }
 
+// statusHandler returns an http.HandlerFunc that serves the Supervisor's
+// current status snapshot as JSON, e.g. {"hanging-worker": "running"}.
+func statusHandler(sup *Supervisor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sup.Statuses())
+	}
+}
+
 func main() {
 	sup := NewSupervisor()
 
@@ -220,6 +229,8 @@ func main() {
 		sup.Heartbeat(payload.Name)
 		fmt.Fprintf(w, "ok\n")
 	})
+
+	http.HandleFunc("/status", statusHandler(sup))
 
 	// --- Process supervision goroutines ---
 	// Two demo services, showing the two failure modes this project cares

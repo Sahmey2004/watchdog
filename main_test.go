@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 )
@@ -74,4 +77,37 @@ func TestSuperviseSetsStatusTransitions(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("expected status %q for test-exit within 2s, last seen %q", "exited", last)
+}
+
+func TestStatusHandler(t *testing.T) {
+	sup := NewSupervisor()
+	sup.SetStatus("hanging-worker", "running")
+	sup.SetStatus("flaky-crasher", "crashed")
+
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	rec := httptest.NewRecorder()
+
+	statusHandler(sup)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", rec.Code)
+	}
+
+	var got map[string]string
+	if err := json.NewDecoder(rec.Body).Decode(&got); err != nil {
+		t.Fatalf("failed to decode response body: %v", err)
+	}
+
+	want := map[string]string{
+		"hanging-worker": "running",
+		"flaky-crasher":  "crashed",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d statuses, got %d: %v", len(want), len(got), got)
+	}
+	for name, status := range want {
+		if got[name] != status {
+			t.Errorf("expected %s to have status %q, got %q", name, status, got[name])
+		}
+	}
 }
