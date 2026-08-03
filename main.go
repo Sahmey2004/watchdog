@@ -21,6 +21,7 @@ type Supervisor struct {
 	services  map[string]time.Time
 	killChans map[string]chan struct{}
 	status    map[string]string
+	hub       *Hub
 }
 
 func NewSupervisor() *Supervisor {
@@ -29,6 +30,15 @@ func NewSupervisor() *Supervisor {
 		killChans: make(map[string]chan struct{}),
 		status:    make(map[string]string),
 	}
+}
+
+// SetHub attaches a Hub that SetStatus will broadcast to on every call. A
+// Supervisor with no Hub attached (the zero value, nil) skips broadcasting
+// entirely — SetStatus still updates internal state as normal.
+func (s *Supervisor) SetHub(hub *Hub) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hub = hub
 }
 
 // RegisterKillChan lets a Supervise loop hand the Supervisor a channel it
@@ -60,11 +70,22 @@ func (s *Supervisor) TriggerRestart(name string) {
 }
 
 // SetStatus records the current lifecycle status of a supervised service,
-// e.g. "starting", "running", "crashed", "exited", "killed-stale".
+// e.g. "starting", "running", "crashed", "exited", "killed-stale". If a
+// Hub is attached (see SetHub), it also broadcasts the updated status
+// snapshot to every connected dashboard — the broadcast happens after the
+// lock is released, so a slow or stuck client can never hold up other
+// goroutines trying to update Supervisor state.
 func (s *Supervisor) SetStatus(name, status string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.status[name] = status
+	hub := s.hub
+	s.mu.Unlock()
+
+	if hub != nil {
+		if payload, err := json.Marshal(s.Statuses()); err == nil {
+			hub.Broadcast(payload)
+		}
+	}
 }
 
 // Statuses returns a snapshot copy of every known service's current
@@ -273,6 +294,19 @@ function renderTiles(statuses) {
   }
 }
 
+// Live push: the server sends the full status snapshot the moment it
+// changes, so tiles update instantly instead of waiting for the next
+// poll. The setInterval polling loop below keeps running regardless, as
+// a fallback if the WebSocket connection ever drops or can't connect.
+var wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+var ws = new WebSocket(wsProtocol + '//' + location.host + '/ws');
+ws.onmessage = function(event) {
+  renderTiles(JSON.parse(event.data));
+};
+ws.onerror = function(err) {
+  console.log('websocket error, falling back to polling:', err);
+};
+
 fetchStatus();
 setInterval(fetchStatus, 1000);
 </script>
@@ -289,11 +323,12 @@ func dashboardHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // routes builds the HTTP mux for the supervisor's endpoints: /heartbeat,
-// /status, and /dashboard. Extracted out of main() so tests can exercise
-// real routing (e.g. via httptest.NewServer) instead of calling handler
-// functions directly, which would bypass the mux entirely and miss a
-// mismatch between a registered path and what a client actually requests.
-func routes(sup *Supervisor) *http.ServeMux {
+// /status, /dashboard, and /ws. Extracted out of main() so tests can
+// exercise real routing (e.g. via httptest.NewServer) instead of calling
+// handler functions directly, which would bypass the mux entirely and
+// miss a mismatch between a registered path and what a client actually
+// requests.
+func routes(sup *Supervisor, hub *Hub) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// --- HTTP handler: services POST here to say "I'm alive" ---
@@ -311,6 +346,7 @@ func routes(sup *Supervisor) *http.ServeMux {
 
 	mux.HandleFunc("/status", statusHandler(sup))
 	mux.HandleFunc("/dashboard", dashboardHandler)
+	mux.HandleFunc("/ws", wsHandler(sup, hub))
 
 	return mux
 }
@@ -318,7 +354,10 @@ func routes(sup *Supervisor) *http.ServeMux {
 func main() {
 	sup := NewSupervisor()
 
-	mux := routes(sup)
+	hub := NewHub()
+	sup.SetHub(hub)
+
+	mux := routes(sup, hub)
 
 	// --- Process supervision goroutines ---
 	// Two demo services, showing the two failure modes this project cares

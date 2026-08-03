@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestHeartbeatAndCheckStale(t *testing.T) {
@@ -63,6 +65,36 @@ func TestSetStatusAndStatuses(t *testing.T) {
 	}
 }
 
+func TestSetStatusBroadcastsToHub(t *testing.T) {
+	sup := NewSupervisor()
+	hub := NewHub()
+	sup.SetHub(hub)
+	ch := hub.Register()
+
+	sup.SetStatus("hanging-worker", "running")
+
+	select {
+	case payload := <-ch:
+		var got map[string]string
+		if err := json.Unmarshal(payload, &got); err != nil {
+			t.Fatalf("failed to unmarshal broadcast payload: %v", err)
+		}
+		if got["hanging-worker"] != "running" {
+			t.Errorf("expected broadcast to contain hanging-worker=running, got %v", got)
+		}
+	default:
+		t.Error("expected SetStatus to broadcast to the registered client, got no message")
+	}
+}
+
+func TestSetStatusWithNoHubDoesNotPanic(t *testing.T) {
+	sup := NewSupervisor()
+	sup.SetStatus("hanging-worker", "running")
+	if got := sup.Statuses()["hanging-worker"]; got != "running" {
+		t.Errorf("expected status to be recorded even with no hub attached, got %q", got)
+	}
+}
+
 func TestSuperviseSetsStatusTransitions(t *testing.T) {
 	sup := NewSupervisor()
 
@@ -96,7 +128,7 @@ func TestSuperviseSetsStatusTransitions(t *testing.T) {
 func TestRoutesWiring(t *testing.T) {
 	sup := NewSupervisor()
 	sup.SetStatus("test-service", "running")
-	server := httptest.NewServer(routes(sup))
+	server := httptest.NewServer(routes(sup, NewHub()))
 	defer server.Close()
 
 	resp, err := http.Get(server.URL + "/status")
@@ -122,6 +154,53 @@ func TestRoutesWiring(t *testing.T) {
 	defer resp2.Body.Close()
 	if resp2.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 from /dashboard, got %d", resp2.StatusCode)
+	}
+}
+
+// TestWebSocketPushesStatusUpdates connects a real WebSocket client to a
+// real server (via httptest.NewServer) and verifies two things end to
+// end: a fresh connection immediately receives the current snapshot, and
+// a later SetStatus call pushes an updated snapshot without the client
+// polling for it — the actual behavior Stage 4b exists to add.
+func TestWebSocketPushesStatusUpdates(t *testing.T) {
+	sup := NewSupervisor()
+	hub := NewHub()
+	sup.SetHub(hub)
+	sup.SetStatus("hanging-worker", "starting")
+
+	server := httptest.NewServer(routes(sup, hub))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/ws"
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("failed to dial %s: %v", wsURL, err)
+	}
+	defer conn.Close()
+
+	_, initial, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read initial snapshot: %v", err)
+	}
+	var got map[string]string
+	if err := json.Unmarshal(initial, &got); err != nil {
+		t.Fatalf("failed to unmarshal initial snapshot: %v", err)
+	}
+	if got["hanging-worker"] != "starting" {
+		t.Fatalf("expected initial snapshot to show hanging-worker=starting, got %v", got)
+	}
+
+	sup.SetStatus("hanging-worker", "running")
+
+	_, update, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read pushed update: %v", err)
+	}
+	if err := json.Unmarshal(update, &got); err != nil {
+		t.Fatalf("failed to unmarshal pushed update: %v", err)
+	}
+	if got["hanging-worker"] != "running" {
+		t.Fatalf("expected pushed update to show hanging-worker=running, got %v", got)
 	}
 }
 
@@ -171,7 +250,7 @@ func TestDashboardHandler(t *testing.T) {
 		t.Errorf("expected Content-Type text/html, got %q", ct)
 	}
 	body := rec.Body.String()
-	for _, want := range []string{"/status", "setInterval", "background: #000", "color: #fff"} {
+	for _, want := range []string{"/status", "setInterval", "background: #000", "color: #fff", "/ws", "WebSocket"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected dashboard HTML to contain %q", want)
 		}
