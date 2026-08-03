@@ -27,3 +27,34 @@ func TestHeartbeatAndCheckStale(t *testing.T) {
 		t.Errorf("expected [ghost-service] to be stale, got %v", stale)
 	}
 }
+
+func TestSetStatusAndStatuses(t *testing.T) {
+	sup := NewSupervisor()
+
+	sup.SetStatus("hanging-worker", "running")
+	sup.SetStatus("flaky-crasher", "crashed")
+
+	got := sup.Statuses()
+	want := map[string]string{
+		"hanging-worker": "running",
+		"flaky-crasher":  "crashed",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("expected %d statuses, got %d: %v", len(want), len(got), got)
+	}
+	for name, status := range want {
+		if got[name] != status {
+			t.Errorf("expected %s to have status %q, got %q", name, status, got[name])
+		}
+	}
+
+	// Statuses() must return a copy — mutating it must not affect the
+	// Supervisor's internal state.
+	got["hanging-worker"] = "tampered"
+	sup.mu.Lock()
+	internal := sup.status["hanging-worker"]
+	sup.mu.Unlock()
+	if internal != "running" {
+		t.Errorf("expected internal status to remain %q, got %q — Statuses() leaked the live map", "running", internal)
+	}
+}

@@ -20,12 +20,14 @@ type Supervisor struct {
 	mu        sync.Mutex
 	services  map[string]time.Time
 	killChans map[string]chan struct{}
+	status    map[string]string
 }
 
 func NewSupervisor() *Supervisor {
 	return &Supervisor{
 		services:  make(map[string]time.Time),
 		killChans: make(map[string]chan struct{}),
+		status:    make(map[string]string),
 	}
 }
 
@@ -55,6 +57,28 @@ func (s *Supervisor) TriggerRestart(name string) {
 	case ch <- struct{}{}:
 	default:
 	}
+}
+
+// SetStatus records the current lifecycle status of a supervised service,
+// e.g. "starting", "running", "crashed", "exited", "killed-stale".
+func (s *Supervisor) SetStatus(name, status string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status[name] = status
+}
+
+// Statuses returns a snapshot copy of every known service's current
+// status. It returns a copy, not the live map, so callers can read or
+// mutate the result after the call without racing against concurrent
+// writes from Supervise goroutines.
+func (s *Supervisor) Statuses() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.status))
+	for name, status := range s.status {
+		out[name] = status
+	}
+	return out
 }
 
 // Heartbeat records that a service is alive right now.
